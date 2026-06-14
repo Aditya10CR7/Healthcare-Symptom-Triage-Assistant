@@ -130,6 +130,14 @@ const graphNodes: Array<{ id: GraphNodeId; backendNode?: string; label: string; 
   { id: "final_response", label: "Final Response", description: "Shows a user-facing triage recommendation.", icon: HeartPulse },
 ];
 
+const nodeAliases: Record<GraphNodeId, string[]> = {
+  intake: ["intake", "validate_intake"],
+  symptom_analyzer_node: ["symptom_analyzer_node", "symptom_analyzer"],
+  care_guidance_node: ["care_guidance_node", "care_guidance"],
+  supervisor_node: ["supervisor_node", "supervisor"],
+  final_response: ["final_response", "persist_case"],
+};
+
 const loadingMessages = ["Validating intake", "Analyzing symptoms", "Checking red flags", "Preparing care guidance", "Finalizing recommendation"];
 
 const fadeUp = {
@@ -139,6 +147,57 @@ const fadeUp = {
 
 function titleCaseLevel(level: string) {
   return level.replace("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeTriageResponse(raw: any): TriageResponse {
+  const level = raw.triage_level ?? raw.final?.final_triage_level ?? "doctor_visit";
+  const final = raw.final ?? raw.supervisor ?? {};
+  const analyzer = raw.symptom_analyzer ?? {};
+  const guidance = raw.care_guidance ?? {};
+  const visitedNodes = raw.graph?.visited_nodes ?? raw.graph?.nodes_visited ?? [];
+
+  return {
+    case_id: raw.case_id ?? "case_unavailable",
+    triage_level: level,
+    final: {
+      triage_level: final.triage_level ?? final.final_triage_level ?? level,
+      summary: final.summary ?? final.reason ?? "The triage workflow completed.",
+      recommendation: final.recommendation ?? `${titleCaseLevel(level)} recommended`,
+      reason: final.reason ?? "The care level was selected using the available symptom details.",
+      safety_note: final.safety_note ?? "This is not a diagnosis or a substitute for professional medical care.",
+    },
+    symptom_analyzer: {
+      symptoms: analyzer.symptoms ?? analyzer.symptoms_extracted ?? [],
+      age: analyzer.age ?? null,
+      duration: analyzer.duration ?? analyzer.duration_assessment ?? "unknown",
+      severity: analyzer.severity ?? analyzer.severity_assessment ?? "unknown",
+      red_flags: analyzer.red_flags ? analyzer.red_flags.length > 0 : Boolean(analyzer.red_flag_detected),
+      red_flag_details: analyzer.red_flag_details ?? analyzer.red_flags ?? [],
+      likely_category: analyzer.likely_category ?? analyzer.category ?? "general",
+      missing_information: analyzer.missing_information ?? [],
+    },
+    care_guidance: {
+      recommendation: guidance.recommendation ?? guidance.recommended_level ?? level,
+      reason: guidance.reason ?? guidance.reasoning ?? "Care guidance was generated from the analyzer output.",
+      next_steps: guidance.next_steps ?? final.next_steps ?? [],
+      escalation_advice: guidance.escalation_advice ?? "Seek urgent or emergency care if symptoms worsen or red flags appear.",
+      disclaimer: guidance.disclaimer ?? "This is not a diagnosis or substitute for professional medical care.",
+    },
+    supervisor: {
+      triage_level: raw.supervisor?.triage_level ?? raw.supervisor?.final_triage_level ?? level,
+      summary: raw.supervisor?.summary ?? raw.supervisor?.reason ?? final.reason ?? "Supervisor safety check completed.",
+      recommendation: raw.supervisor?.recommendation ?? final.recommendation ?? `${titleCaseLevel(level)} recommended`,
+      reason: raw.supervisor?.reason ?? final.reason ?? "The supervisor selected the final care level.",
+      safety_note: raw.supervisor?.safety_note ?? final.safety_note ?? "This is not a diagnosis or a substitute for professional medical care.",
+    },
+    graph: {
+      visited_nodes: visitedNodes,
+      used_llm: raw.graph?.used_llm ?? false,
+      provider: raw.graph?.provider ?? "deterministic",
+      model_name: raw.graph?.model_name ?? "rules engine",
+      fallback_reason: raw.graph?.fallback_reason ?? null,
+    },
+  };
 }
 
 function graphStatus(result: TriageResponse | null) {
@@ -154,7 +213,7 @@ function graphStatus(result: TriageResponse | null) {
 function nodeIsComplete(node: (typeof graphNodes)[number], result: TriageResponse | null) {
   if (!result) return false;
   if (node.id === "intake" || node.id === "final_response") return true;
-  return result.graph.visited_nodes.includes(node.backendNode ?? node.id);
+  return nodeAliases[node.id].some((alias) => result.graph.visited_nodes.includes(alias));
 }
 
 function nodeSummary(nodeId: GraphNodeId, intake: Intake, result: TriageResponse | null) {
@@ -341,7 +400,7 @@ export default function App() {
         }),
       });
       if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
-      setResult(await response.json());
+      setResult(normalizeTriageResponse(await response.json()));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to analyze symptoms.");
     } finally {
